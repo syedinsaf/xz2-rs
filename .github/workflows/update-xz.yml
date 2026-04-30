@@ -1,0 +1,70 @@
+name: Update bundled XZ Utils
+
+on:
+  schedule:
+    - cron: '0 0 * * 1'  # every Monday at midnight
+  workflow_dispatch:       # allow manual trigger
+
+jobs:
+  update-xz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check latest XZ version
+        id: versions
+        run: |
+          LATEST=$(curl -fsSL "https://api.github.com/repos/tukaani-project/xz/releases/latest" \
+            | grep '"tag_name"' | sed 's/.*"v\([^"]*\)".*/\1/')
+          CURRENT=$(grep -m1 'xz-[0-9]' lzma-sys/build.rs | grep -o '[0-9]*\.[0-9]*\.[0-9]*' | head -1)
+
+          echo "latest=$LATEST" >> $GITHUB_OUTPUT
+          echo "current=$CURRENT" >> $GITHUB_OUTPUT
+          echo "Latest: $LATEST | Current: $CURRENT"
+
+      - name: Skip if already up to date
+        if: steps.versions.outputs.latest == steps.versions.outputs.current
+        run: |
+          echo "Already on latest XZ (${{ steps.versions.outputs.current }}), nothing to do."
+          exit 0
+
+      - name: Swap bundled XZ source
+        if: steps.versions.outputs.latest != steps.versions.outputs.current
+        run: |
+          LATEST="${{ steps.versions.outputs.latest }}"
+          CURRENT="${{ steps.versions.outputs.current }}"
+
+          cd lzma-sys
+
+          # Remove old source
+          rm -rf "xz-${CURRENT}"
+
+          # Download and extract new source
+          curl -fsSL "https://github.com/tukaani-project/xz/releases/download/v${LATEST}/xz-${LATEST}.tar.gz" \
+            | tar -xz
+
+          # Patch build.rs
+          sed -i "s/xz-${CURRENT}/xz-${LATEST}/g" build.rs
+
+          # Verify
+          grep -q "xz-${LATEST}" build.rs || (echo "Patch failed!" && exit 1)
+          test -f "xz-${LATEST}/src/liblzma/api/lzma/version.h" || (echo "Source missing!" && exit 1)
+
+          echo "Successfully updated xz-${CURRENT} -> xz-${LATEST}"
+
+      - name: Open PR
+        if: steps.versions.outputs.latest != steps.versions.outputs.current
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "bump bundled XZ Utils from ${{ steps.versions.outputs.current }} to ${{ steps.versions.outputs.latest }}"
+          title: "chore: bump bundled XZ Utils from ${{ steps.versions.outputs.current }} to ${{ steps.versions.outputs.latest }}"
+          body: |
+            Automated bump of bundled XZ Utils source.
+
+            - **From:** ${{ steps.versions.outputs.current }}
+            - **To:** ${{ steps.versions.outputs.latest }}
+
+            Triggered by scheduled workflow. Please verify build passes before merging.
+          branch: "update-xz-${{ steps.versions.outputs.latest }}"
+          delete-branch: true
